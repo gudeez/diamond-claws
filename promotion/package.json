@@ -1,0 +1,14 @@
+{
+  "name": "diamond-claws-promotion",
+  "version": "1.0.0",
+  "description": "Diamond Claws Moltbook promotion tools",
+  "main": "moltbook-poster.js",
+  "scripts": {
+    "post": "node moltbook-poster.js --post intro",
+    "post:all": "node moltbook-poster.js --schedule",
+    "feed": "node moltbook-poster.js --feed"
+  },
+  "keywords": ["moltbook", "promotion", "diamond-claws", "crypto"],
+  "author": "Diamond Claws Team",
+  "license": "MIT"
+}
