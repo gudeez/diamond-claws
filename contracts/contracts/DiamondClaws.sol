@@ -108,7 +108,7 @@ contract DiamondClaws is ERC20, Ownable, ERC20Burnable {
     /**
      * @dev Burn tokens (from staking)
      */
-    function burnFrom(address from, uint256 amount) external onlyStaking {
+    function stakingBurn(address from, uint256 amount) external onlyStaking {
         _burn(from, amount);
     }
     
