@@ -12,6 +12,7 @@ import {DiamondClaws} from "../contracts/DiamondClaws.sol";
 import {DiamondClawsStaking} from "../contracts/DiamondClawsStaking.sol";
 import {DCLAWSwap} from "../contracts/DCLAWSwap.sol";
 import {DCLAWLiquidityRouter} from "../contracts/DCLAWLiquidityRouter.sol";
+import {AgentRegistry} from "../contracts/AgentRegistry.sol";
 
 /**
  * @title Deploy
@@ -87,11 +88,16 @@ contract Deploy is Script {
         DCLAWLiquidityRouter liquidityRouter = new DCLAWLiquidityRouter(IPoolManager(address(poolManager)));
         console.log("LiquidityRouter:", address(liquidityRouter));
 
-        // 7. Exclude hook and liquidity router from token taxes
+        // 7. Deploy AgentRegistry
+        AgentRegistry agentRegistry = new AgentRegistry(deployer);
+        agentRegistry.setAgentWallet(deployer);
+        console.log("AgentRegistry:", address(agentRegistry));
+
+        // 8. Exclude hook and liquidity router from token taxes
         dclaw.setTaxExcluded(address(hook), true);
         dclaw.setTaxExcluded(address(liquidityRouter), true);
 
-        // 8. Initialize a DCLAW/ETH pool with the hook
+        // 9. Initialize a DCLAW/ETH pool with the hook
         //    Currency0 must be < Currency1 by address sort order.
         //    Native ETH = address(0), DCLAW = address(dclaw)
         Currency currency0;
@@ -127,6 +133,7 @@ contract Deploy is Script {
         console.log("DiamondClawsStaking:", address(staking));
         console.log("DCLAWSwap Hook:     ", address(hook));
         console.log("LiquidityRouter:    ", address(liquidityRouter));
+        console.log("AgentRegistry:      ", address(agentRegistry));
         console.log("========================================");
     }
 

@@ -77,6 +77,7 @@ const CONTRACTS = {
   POOL_MANAGER: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
   SWAP_ROUTER: '0x0000000000000000000000000000000000000000',
   HOOK: '0x950ebc63bc4415d20dee44dbd38faf64fa8b0088',
+  AGENT_REGISTRY: '0x0000000000000000000000000000000000000000', // Update after deployment
   CHAIN_ID: 31337,
 };
 
@@ -100,6 +101,16 @@ function encodeFunctionCall(signature: string, args: string[] = []): string {
     'totalStaked()': '0x817b1cd2',
     // Uniswap v4 PoolSwapTest.swap() selector
     'swap(tuple,tuple,tuple,bytes)': '0xf3cd914c',
+    // Agent/smart account support
+    'stakeFor(address,uint256)': '0x2ee40908',
+    'unstakeFor(address,uint256)': '0x36ef088c',
+    'claimRewardsFor(address,uint256)': '0xe10f6046',
+    'claimAllRewardsFor(address)': '0x870edfd4',
+    'setOperatorApproval(address,bool)': '0xa63a1098',
+    'operatorApprovals(address,address)': '0x0d95e054',
+    'permit(address,address,uint256,uint256,uint8,bytes32,bytes32)': '0xd505accf',
+    'nonces(address)': '0x7ecebe00',
+    'DOMAIN_SEPARATOR()': '0x3644e515',
   };
 
   const selector = selectors[signature];

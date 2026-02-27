@@ -1,0 +1,92 @@
+{
+  "version": "1.0",
+  "name": "Diamond Claws Protocol",
+  "description": "DeFi protocol for DCLAW token: ERC-20 with staking rewards, MEV-protected swaps via Uniswap v4, and concentrated liquidity.",
+  "url": "https://diamondclaws.xyz",
+  "logo": "https://diamondclaws.xyz/diamondclaw2.png",
+  "active": true,
+  "services": [
+    {
+      "id": "dclaw-token",
+      "type": "erc20",
+      "name": "DCLAW Token",
+      "description": "Diamond Claws ERC-20 token with ERC-2612 permit support, buy/sell taxes, and burnable supply.",
+      "chains": {
+        "31337": {
+          "address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+        }
+      },
+      "capabilities": ["transfer", "permit", "burn"]
+    },
+    {
+      "id": "dclaw-staking",
+      "type": "staking",
+      "name": "DCLAW Staking",
+      "description": "Stake DCLAW tokens to earn minted rewards. Supports operator delegation for smart account agents.",
+      "chains": {
+        "31337": {
+          "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+        }
+      },
+      "capabilities": [
+        "stake",
+        "stakeFor",
+        "unstake",
+        "unstakeFor",
+        "claimRewards",
+        "claimRewardsFor",
+        "operatorDelegation",
+        "multicall"
+      ],
+      "parameters": {
+        "rewardRateAPY": 100,
+        "unstakeTaxBP": 500,
+        "earlyUnstakeTaxBP": 1000,
+        "earlyUnstakeDuration": 604800,
+        "maxTotalRewards": "100000000000000000000000000"
+      }
+    },
+    {
+      "id": "dclaw-swap",
+      "type": "swap",
+      "name": "DCLAW MEV-Protected Swap",
+      "description": "Uniswap v4 hook for batched, MEV-protected swaps. Exact-input swaps are queued and executed by a keeper.",
+      "chains": {
+        "31337": {
+          "hookAddress": "0x950ebc63bc4415d20dee44dbd38faf64fa8b0088"
+        }
+      },
+      "capabilities": ["batchedSwap", "mevProtection"]
+    },
+    {
+      "id": "dclaw-liquidity",
+      "type": "liquidity",
+      "name": "DCLAW/ETH Liquidity",
+      "description": "Concentrated liquidity provision for DCLAW/ETH via Uniswap v4. Supports operator delegation for smart account agents.",
+      "chains": {
+        "31337": {
+          "address": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
+        }
+      },
+      "capabilities": [
+        "addLiquidity",
+        "addLiquidityFor",
+        "removeLiquidity",
+        "removeLiquidityFor",
+        "operatorDelegation"
+      ]
+    }
+  ],
+  "authentication": {
+    "type": "erc1271",
+    "description": "Supports both EOA (ECDSA) and smart account (ERC-1271) signature verification."
+  },
+  "payment": {
+    "x402": {
+      "endpoint": "/api/payment/dclaw",
+      "description": "x402 payment protocol for purchasing DCLAW tokens."
+    }
+  },
+  "registrations": [],
+  "supportedTrust": ["reputation", "validation"]
+}

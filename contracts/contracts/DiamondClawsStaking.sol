@@ -4,7 +4,8 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import "@openzeppelin/contracts/utils/Multicall.sol";
 
 interface IDiamondClaws {
     function mint(address to, uint256 amount) external;
@@ -17,7 +18,7 @@ interface IDiamondClaws {
  *      Note: Changing rewardRateAPY applies the new rate retroactively to existing
  *      stakes' unclaimed rewards. Owner should set the rate carefully.
  */
-contract DiamondClawsStaking is Ownable, ReentrancyGuard {
+contract DiamondClawsStaking is Ownable, ReentrancyGuardTransient, Multicall {
     using SafeERC20 for IERC20;
 
     // Token interfaces
@@ -48,6 +49,9 @@ contract DiamondClawsStaking is Ownable, ReentrancyGuard {
     address public taxWallet;
     uint256 public totalStaked;
 
+    // Operator delegation: user => operator => approved
+    mapping(address => mapping(address => bool)) public operatorApprovals;
+
     // Events
     event Staked(address indexed user, uint256 amount, uint256 stakeId);
     event Unstaked(address indexed user, uint256 amount, uint256 stakeId, uint256 taxPaid);
@@ -55,6 +59,15 @@ contract DiamondClawsStaking is Ownable, ReentrancyGuard {
     event RewardRateUpdated(uint256 newRate);
     event MaxTotalRewardsUpdated(uint256 newMax);
     event TaxWalletUpdated(address indexed newTaxWallet);
+    event OperatorApprovalSet(address indexed user, address indexed operator, bool approved);
+
+    modifier onlyUserOrOperator(address user) {
+        require(
+            msg.sender == user || operatorApprovals[user][msg.sender],
+            "Not user or approved operator"
+        );
+        _;
+    }
 
     constructor(address _stakeToken, address _taxWallet, address _initialOwner)
         Ownable(_initialOwner)
@@ -161,6 +174,106 @@ contract DiamondClawsStaking is Ownable, ReentrancyGuard {
         require(totalReward > 0, "No rewards to claim");
 
         _mintRewards(msg.sender, totalReward);
+    }
+
+    // --- Operator Delegation ---
+
+    /**
+     * @dev Approve or revoke an operator to act on behalf of msg.sender
+     */
+    function setOperatorApproval(address operator, bool approved) external {
+        operatorApprovals[msg.sender][operator] = approved;
+        emit OperatorApprovalSet(msg.sender, operator, approved);
+    }
+
+    // --- On-Behalf-Of Functions (for smart accounts / agents) ---
+
+    /**
+     * @dev Stake tokens on behalf of a beneficiary. Caller must be the beneficiary or an approved operator.
+     *      Tokens are transferred from the beneficiary (who must have approved this contract).
+     */
+    function stakeFor(address beneficiary, uint256 amount) external nonReentrant onlyUserOrOperator(beneficiary) {
+        require(amount > 0, "Cannot stake 0");
+        require(beneficiary != address(0), "Invalid beneficiary");
+
+        stakeToken.safeTransferFrom(beneficiary, address(this), amount);
+
+        StakeInfo memory newStake = StakeInfo({
+            amount: amount,
+            startTime: block.timestamp,
+            rewardsClaimed: 0
+        });
+
+        userStakes[beneficiary].push(newStake);
+        totalStaked += amount;
+
+        emit Staked(beneficiary, amount, userStakes[beneficiary].length - 1);
+    }
+
+    /**
+     * @dev Unstake tokens on behalf of a user. Tokens and rewards are sent to the user, not msg.sender.
+     */
+    function unstakeFor(address user, uint256 stakeId) external nonReentrant onlyUserOrOperator(user) {
+        require(stakeId < userStakes[user].length, "Invalid stake ID");
+
+        StakeInfo storage stakeInfo = userStakes[user][stakeId];
+        require(stakeInfo.amount > 0, "Already unstaked");
+
+        uint256 rewards = calculateRewards(user, stakeId);
+        uint256 stakedAmount = stakeInfo.amount;
+        uint256 taxAmount = calculateUnstakeTax(stakedAmount, stakeInfo.startTime);
+        uint256 receiveAmount = stakedAmount - taxAmount;
+
+        totalStaked -= stakedAmount;
+        stakeInfo.amount = 0;
+
+        if (taxAmount > 0) {
+            stakeToken.safeTransfer(taxWallet, taxAmount);
+        }
+        stakeToken.safeTransfer(user, receiveAmount);
+
+        if (rewards > 0) {
+            _mintRewards(user, rewards);
+        }
+
+        emit Unstaked(user, stakedAmount, stakeId, taxAmount);
+    }
+
+    /**
+     * @dev Claim rewards from a specific stake on behalf of a user. Rewards are sent to the user.
+     */
+    function claimRewardsFor(address user, uint256 stakeId) external nonReentrant onlyUserOrOperator(user) {
+        require(stakeId < userStakes[user].length, "Invalid stake ID");
+
+        StakeInfo storage stakeInfo = userStakes[user][stakeId];
+        require(stakeInfo.amount > 0, "Stake inactive");
+
+        uint256 rewards = calculateRewards(user, stakeId);
+        require(rewards > 0, "No rewards to claim");
+
+        stakeInfo.rewardsClaimed += rewards;
+        _mintRewards(user, rewards);
+    }
+
+    /**
+     * @dev Claim all pending rewards on behalf of a user. Rewards are sent to the user.
+     */
+    function claimAllRewardsFor(address user) external nonReentrant onlyUserOrOperator(user) {
+        uint256 totalReward = 0;
+
+        StakeInfo[] storage stakes = userStakes[user];
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (stakes[i].amount > 0) {
+                uint256 stakeReward = calculateRewards(user, i);
+                if (stakeReward > 0) {
+                    stakes[i].rewardsClaimed += stakeReward;
+                    totalReward += stakeReward;
+                }
+            }
+        }
+
+        require(totalReward > 0, "No rewards to claim");
+        _mintRewards(user, totalReward);
     }
 
     /**

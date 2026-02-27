@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 
@@ -10,7 +11,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
  * @dev ERC-20 token for Diamond Claws - combining Diamond Hands meme with OpenClaw agentic culture.
  *      Supports buy/sell/transfer taxes via a DEX pair registry, and capped minting for staking rewards.
  */
-contract DiamondClaws is ERC20, Ownable, ERC20Burnable {
+contract DiamondClaws is ERC20, ERC20Permit, Ownable, ERC20Burnable {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
     uint256 public constant MAX_SUPPLY = 1_100_000_000 * 10**18;   // 1.1B (base + 10% staking emissions)
 
@@ -39,6 +40,7 @@ contract DiamondClaws is ERC20, Ownable, ERC20Burnable {
 
     constructor(address _initialOwner, address _taxWallet)
         ERC20("Diamond Claws", "DCLAW")
+        ERC20Permit("Diamond Claws")
         Ownable(_initialOwner)
     {
         require(_taxWallet != address(0), "Tax wallet cannot be zero address");

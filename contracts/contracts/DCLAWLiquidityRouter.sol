@@ -41,8 +41,20 @@ contract DCLAWLiquidityRouter is IUnlockCallback {
     // user => array of positions
     mapping(address => Position[]) public userPositions;
 
+    // Operator delegation: user => operator => approved
+    mapping(address => mapping(address => bool)) public operatorApprovals;
+
     event LiquidityAdded(address indexed user, int24 tickLower, int24 tickUpper, uint128 liquidity);
     event LiquidityRemoved(address indexed user, int24 tickLower, int24 tickUpper, uint128 liquidity);
+    event OperatorApprovalSet(address indexed user, address indexed operator, bool approved);
+
+    modifier onlyUserOrOperator(address user) {
+        require(
+            msg.sender == user || operatorApprovals[user][msg.sender],
+            "Not user or approved operator"
+        );
+        _;
+    }
 
     constructor(IPoolManager _manager) {
         manager = _manager;
@@ -121,6 +133,88 @@ contract DCLAWLiquidityRouter is IUnlockCallback {
 
         emit LiquidityRemoved(msg.sender, tickLower, tickUpper, uint128(uint256(-liquidityDelta)));
     }
+
+    // --- Operator Delegation ---
+
+    /// @notice Approve or revoke an operator to act on behalf of msg.sender
+    function setOperatorApproval(address operator, bool approved) external {
+        operatorApprovals[msg.sender][operator] = approved;
+        emit OperatorApprovalSet(msg.sender, operator, approved);
+    }
+
+    // --- On-Behalf-Of Functions (for smart accounts / agents) ---
+
+    /// @notice Add liquidity on behalf of a user. Position is attributed to `user`, ETH refunds go to `user`.
+    function addLiquidityFor(
+        address user,
+        PoolKey calldata key,
+        int24 tickLower,
+        int24 tickUpper,
+        int256 liquidityDelta
+    ) external payable onlyUserOrOperator(user) returns (BalanceDelta delta) {
+        require(liquidityDelta > 0, "Must add positive liquidity");
+
+        bytes32 salt = bytes32(uint256(uint160(user)));
+
+        ModifyLiquidityParams memory params = ModifyLiquidityParams({
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            liquidityDelta: liquidityDelta,
+            salt: salt
+        });
+
+        delta = abi.decode(
+            manager.unlock(abi.encode(CallbackData(user, key, params))),
+            (BalanceDelta)
+        );
+
+        _upsertPosition(user, key, tickLower, tickUpper);
+
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            (bool sent,) = user.call{value: ethBalance}("");
+            require(sent, "ETH refund failed");
+        }
+
+        emit LiquidityAdded(user, tickLower, tickUpper, uint128(uint256(liquidityDelta)));
+    }
+
+    /// @notice Remove liquidity on behalf of a user. Tokens and ETH go to `user`.
+    function removeLiquidityFor(
+        address user,
+        PoolKey calldata key,
+        int24 tickLower,
+        int24 tickUpper,
+        int256 liquidityDelta
+    ) external onlyUserOrOperator(user) returns (BalanceDelta delta) {
+        require(liquidityDelta < 0, "Must remove negative liquidity");
+
+        bytes32 salt = bytes32(uint256(uint160(user)));
+
+        ModifyLiquidityParams memory params = ModifyLiquidityParams({
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            liquidityDelta: liquidityDelta,
+            salt: salt
+        });
+
+        delta = abi.decode(
+            manager.unlock(abi.encode(CallbackData(user, key, params))),
+            (BalanceDelta)
+        );
+
+        _upsertPosition(user, key, tickLower, tickUpper);
+
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            (bool sent,) = user.call{value: ethBalance}("");
+            require(sent, "ETH send failed");
+        }
+
+        emit LiquidityRemoved(user, tickLower, tickUpper, uint128(uint256(-liquidityDelta)));
+    }
+
+    // --- View Functions ---
 
     /// @notice Get all positions for a user
     function getPositionCount(address user) external view returns (uint256) {
