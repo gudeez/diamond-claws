@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.24;
 
 import {BaseAsyncSwap} from "@openzeppelin/uniswap-hooks/base/BaseAsyncSwap.sol";
 import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
@@ -10,7 +10,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
@@ -65,6 +65,9 @@ contract DCLAWSwap is BaseAsyncSwap, IUnlockCallback {
     uint256 public swapExpiry = 1 hours; // Queued swaps expire after this duration
     uint256 public batchCounter;
 
+    // When true, swaps bypass the async queue and execute normally through the pool
+    bool internal _executingBatch;
+
     // Pool-specific swap queues (PoolId => SwapIntent[])
     mapping(bytes32 => SwapIntent[]) internal _swapQueues;
 
@@ -114,6 +117,11 @@ contract DCLAWSwap is BaseAsyncSwap, IUnlockCallback {
         SwapParams calldata params,
         bytes calldata hookData
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+        // During batch execution, let swaps pass through normally (no queuing)
+        if (_executingBatch) {
+            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+
         // Only intercept exact-input swaps (amountSpecified < 0)
         // Exact-output swaps pass through to normal pool logic via BaseAsyncSwap
         if (params.amountSpecified < 0) {
@@ -198,6 +206,8 @@ contract DCLAWSwap is BaseAsyncSwap, IUnlockCallback {
         (PoolKey memory key, SwapIntent[] memory batch, bytes32 poolIdBytes) =
             abi.decode(data, (PoolKey, SwapIntent[], bytes32));
 
+        _executingBatch = true;
+
         uint256 totalInput;
         uint256 executed;
 
@@ -239,6 +249,8 @@ contract DCLAWSwap is BaseAsyncSwap, IUnlockCallback {
             executed++;
         }
 
+        _executingBatch = false;
+
         emit BatchExecuted(key.toId(), batchCounter, executed, totalInput);
 
         return bytes("");
@@ -249,8 +261,8 @@ contract DCLAWSwap is BaseAsyncSwap, IUnlockCallback {
      */
     function _getOutputDelta(Currency currency) internal view returns (uint256) {
         int256 delta = TransientStateLibrary.currencyDelta(poolManager, address(this), currency);
-        // A negative delta means the pool owes us tokens (output)
-        return delta < 0 ? uint256(-delta) : 0;
+        // A positive delta means the pool owes us tokens (credit we can take)
+        return delta > 0 ? uint256(delta) : 0;
     }
 
     // --- View Functions ---

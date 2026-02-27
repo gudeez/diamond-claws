@@ -11,6 +11,7 @@ import {
   Coins,
   ArrowRight,
   ArrowDown,
+  ArrowUpDown,
   Zap,
   Shield,
   Users,
@@ -66,17 +67,16 @@ const STAKING_ABI = [
 ];
 
 const SWAP_ABI = [
-  'function swapETHForDCLAW() payable',
-  'function getAmountOut(uint256 ethAmount) view returns (uint256)',
-  'function rate() view returns (uint256)',
-  'function availableLiquidity() view returns (uint256)',
+  'function getQueueLength(tuple(address,address,uint24,int24,address)) view returns (uint256)',
 ];
 
-// Contract addresses (local Hardhat deployment)
+// Contract addresses — update after running: forge script script/Deploy.s.sol
 const CONTRACTS = {
-  DCLAW: '0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1',
-  STAKING: '0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44',
-  SWAP: '0x4A679253410272dd5232B3Ff7cF5dbB88f295319',
+  DCLAW: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+  STAKING: '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0',
+  POOL_MANAGER: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+  SWAP_ROUTER: '0x0000000000000000000000000000000000000000',
+  HOOK: '0x950ebc63bc4415d20dee44dbd38faf64fa8b0088',
   CHAIN_ID: 31337,
 };
 
@@ -88,11 +88,18 @@ function encodeFunctionCall(signature: string, args: string[] = []): string {
 
   // Simple function selector via Web Crypto (sync fallback with lookup table)
   const selectors: Record<string, string> = {
-    'swapETHForDCLAW()': '0x921e29b2',
     'balanceOf(address)': '0x70a08231',
-    'getAmountOut(uint256)': '0x5c195217',
-    'rate()': '0x2c4e722e',
-    'availableLiquidity()': '0x74375359',
+    'approve(address,uint256)': '0x095ea7b3',
+    'stake(uint256)': '0xa694fc3a',
+    'unstake(uint256)': '0x2e17de78',
+    'claimAllRewards()': '0x0b83a727',
+    'getStakeCount(address)': '0xcf57ee69',
+    'getStakeInfo(address,uint256)': '0x3b521efe',
+    'getTotalPendingRewards(address)': '0xa8c478ba',
+    'rewardRateAPY()': '0xaac9dafc',
+    'totalStaked()': '0x817b1cd2',
+    // Uniswap v4 PoolSwapTest.swap() selector
+    'swap(tuple,tuple,tuple,bytes)': '0xf3cd914c',
   };
 
   const selector = selectors[signature];
@@ -132,6 +139,36 @@ function parseEther(eth: string): string {
   return '0x' + wei.toString(16);
 }
 
+function decodeMultiple(hex: string, count: number): bigint[] {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  const results: bigint[] = [];
+  for (let i = 0; i < count; i++) {
+    const chunk = clean.slice(i * 64, (i + 1) * 64);
+    results.push(chunk ? BigInt('0x' + chunk) : BigInt(0));
+  }
+  return results;
+}
+
+function formatTimeSince(startTimeSeconds: bigint): string {
+  const now = Math.floor(Date.now() / 1000);
+  const elapsed = now - Number(startTimeSeconds);
+  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
+  if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h ago`;
+  return `${Math.floor(elapsed / 86400)}d ago`;
+}
+
+function isEarlyUnstake(startTimeSeconds: bigint): boolean {
+  const now = Math.floor(Date.now() / 1000);
+  return now - Number(startTimeSeconds) < 7 * 24 * 3600;
+}
+
+interface StakeData {
+  id: number;
+  amount: bigint;
+  startTime: bigint;
+  pendingReward: bigint;
+}
+
 export default function DiamondClawsApp() {
   // Wallet state
   const [isConnected, setIsConnected] = useState(false);
@@ -140,18 +177,21 @@ export default function DiamondClawsApp() {
   const [dclawBalance, setDclawBalance] = useState('0');
 
   // Swap state
-  const [swapInputETH, setSwapInputETH] = useState('');
-  const [swapOutputDCLAW, setSwapOutputDCLAW] = useState('');
-  const [swapRate, setSwapRate] = useState('1,000,000');
-  const [liquidity, setLiquidity] = useState('0');
+  const [swapDirection, setSwapDirection] = useState<'ethToDclaw' | 'dclawToEth'>('ethToDclaw');
+  const [swapInput, setSwapInput] = useState('');
+  const [swapOutput, setSwapOutput] = useState('');
   const [isSwapping, setIsSwapping] = useState(false);
   const [swapTxHash, setSwapTxHash] = useState('');
 
   // Staking state
-  const [stakedAmount, setStakedAmount] = useState('0');
+  const [stakes, setStakes] = useState<StakeData[]>([]);
+  const [totalPendingRewards, setTotalPendingRewards] = useState<bigint>(BigInt(0));
+  const [contractAPY, setContractAPY] = useState<number>(100);
+  const [contractTotalStaked, setContractTotalStaked] = useState<bigint>(BigInt(0));
   const [stakeCount, setStakeCount] = useState(0);
   const [stakeAmount, setStakeAmount] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isClaiming, setIsClaiming] = useState(false);
   const [status, setStatus] = useState('');
 
   // EIP-6963 wallet discovery state
@@ -220,23 +260,51 @@ export default function DiamondClawsApp() {
       );
       if (dclawBal) setDclawBalance(formatEther(decodeUint256(dclawBal as string)));
 
-      // Fetch swap rate
-      const rate = await readContract(
-        CONTRACTS.SWAP,
-        encodeFunctionCall('rate()')
+      // Fetch staking APY
+      const apyResult = await readContract(
+        CONTRACTS.STAKING,
+        encodeFunctionCall('rewardRateAPY()', [])
       );
-      if (rate) {
-        const rateValue = decodeUint256(rate as string);
-        const rateInTokens = Number(rateValue) / 1e18;
-        setSwapRate(rateInTokens.toLocaleString());
-      }
+      if (apyResult) setContractAPY(Number(decodeUint256(apyResult as string)));
 
-      // Fetch available liquidity
-      const liq = await readContract(
-        CONTRACTS.SWAP,
-        encodeFunctionCall('availableLiquidity()')
+      // Fetch total staked contract-wide
+      const totalStakedResult = await readContract(
+        CONTRACTS.STAKING,
+        encodeFunctionCall('totalStaked()', [])
       );
-      if (liq) setLiquidity(formatEther(decodeUint256(liq as string)));
+      if (totalStakedResult) setContractTotalStaked(decodeUint256(totalStakedResult as string));
+
+      // Fetch stake count
+      const countResult = await readContract(
+        CONTRACTS.STAKING,
+        encodeFunctionCall('getStakeCount(address)', [userAddress])
+      );
+      const count = countResult ? Number(decodeUint256(countResult as string)) : 0;
+      setStakeCount(count);
+
+      // Fetch each stake's info
+      const fetchedStakes: StakeData[] = [];
+      for (let i = 0; i < count; i++) {
+        const infoResult = await readContract(
+          CONTRACTS.STAKING,
+          encodeFunctionCall('getStakeInfo(address,uint256)', [userAddress, i.toString()])
+        );
+        if (infoResult) {
+          const [amount, startTime, pendingReward] = decodeMultiple(infoResult as string, 3);
+          if (amount > BigInt(0)) {
+            fetchedStakes.push({ id: i, amount, startTime, pendingReward });
+          }
+        }
+      }
+      setStakes(fetchedStakes);
+
+      // Fetch total pending rewards
+      const pendingResult = await readContract(
+        CONTRACTS.STAKING,
+        encodeFunctionCall('getTotalPendingRewards(address)', [userAddress])
+      );
+      if (pendingResult) setTotalPendingRewards(decodeUint256(pendingResult as string));
+
     } catch (error) {
       console.error('Error fetching data:', error);
     }
@@ -260,10 +328,6 @@ export default function DiamondClawsApp() {
         if (ethBal) setEthBalance(formatEther(BigInt(ethBal as string)));
         const dclawBal = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.DCLAW, data: encodeFunctionCall('balanceOf(address)', [accounts[0]]) }, 'latest'] });
         if (dclawBal) setDclawBalance(formatEther(decodeUint256(dclawBal as string)));
-        const rate = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.SWAP, data: encodeFunctionCall('rate()') }, 'latest'] });
-        if (rate) { const rateValue = decodeUint256(rate as string); setSwapRate((Number(rateValue) / 1e18).toLocaleString()); }
-        const liq = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.SWAP, data: encodeFunctionCall('availableLiquidity()') }, 'latest'] });
-        if (liq) setLiquidity(formatEther(decodeUint256(liq as string)));
       } catch (e) { console.error('Error fetching initial data:', e); }
     } catch (error) {
       console.error('Failed to connect:', error);
@@ -289,70 +353,92 @@ export default function DiamondClawsApp() {
 
   // Calculate swap output when input changes
   useEffect(() => {
-    if (!swapInputETH || parseFloat(swapInputETH) <= 0) {
-      setSwapOutputDCLAW('');
+    if (!swapInput || parseFloat(swapInput) <= 0) {
+      setSwapOutput('');
       return;
     }
+    // AMM pricing estimate — production app would use a quoter contract
+    const amount = parseFloat(swapInput);
+    if (swapDirection === 'ethToDclaw') {
+      setSwapOutput(`~${(amount * 1_000_000).toLocaleString()}`);
+    } else {
+      setSwapOutput(`~${(amount / 1_000_000).toFixed(6)}`);
+    }
+  }, [swapInput, swapDirection]);
 
-    const calculateOutput = async () => {
-      try {
-        const weiAmount = BigInt(Math.floor(parseFloat(swapInputETH) * 1e18));
-        const result = await readContract(
-          CONTRACTS.SWAP,
-          encodeFunctionCall('getAmountOut(uint256)', [weiAmount.toString()])
-        );
-        if (result) {
-          setSwapOutputDCLAW(formatEther(decodeUint256(result as string)));
-        }
-      } catch {
-        // Fallback calculation
-        const output = parseFloat(swapInputETH) * 1_000_000;
-        setSwapOutputDCLAW(output.toLocaleString());
-      }
-    };
+  // Flip swap direction
+  const flipSwapDirection = () => {
+    setSwapDirection(prev => prev === 'ethToDclaw' ? 'dclawToEth' : 'ethToDclaw');
+    setSwapInput('');
+    setSwapOutput('');
+  };
 
-    calculateOutput();
-  }, [swapInputETH, readContract]);
+  // Wait for transaction receipt helper
+  const waitForReceipt = useCallback(async (txHash: string, maxAttempts = 30): Promise<boolean> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const receipt = await rpcCall('eth_getTransactionReceipt', [txHash]);
+      if (receipt) return (receipt as { status: string }).status === '0x1';
+    }
+    return false;
+  }, [rpcCall]);
 
   // Execute swap
   const executeSwap = async () => {
-    if (!isConnected || !swapInputETH || parseFloat(swapInputETH) <= 0) {
+    if (!isConnected || !swapInput || parseFloat(swapInput) <= 0) {
       setStatus('Enter an amount to swap');
       return;
     }
 
     setIsSwapping(true);
     setSwapTxHash('');
-    setStatus('Confirm the transaction in your wallet...');
 
     try {
-      const txHash = await rpcCall('eth_sendTransaction', [{
-        from: address,
-        to: CONTRACTS.SWAP,
-        value: parseEther(swapInputETH),
-        data: encodeFunctionCall('swapETHForDCLAW()'),
-      }]) as string;
+      const isEthToDclaw = swapDirection === 'ethToDclaw';
 
+      // For DCLAW → ETH, approve DCLAW spend first
+      if (!isEthToDclaw) {
+        setStatus('Approving DCLAW spend... confirm in wallet');
+        const amountWei = parseEther(swapInput);
+        const approveData = encodeFunctionCall('approve(address,uint256)', [
+          CONTRACTS.SWAP_ROUTER,
+          BigInt(amountWei).toString()
+        ]);
+        const approveTx = await rpcCall('eth_sendTransaction', [{
+          from: address,
+          to: CONTRACTS.DCLAW,
+          data: approveData,
+        }]) as string;
+
+        if (!(await waitForReceipt(approveTx))) {
+          setStatus('Approval failed');
+          setIsSwapping(false);
+          return;
+        }
+      }
+
+      setStatus('Confirm the swap in your wallet...');
+
+      const txParams: Record<string, string> = {
+        from: address,
+        to: CONTRACTS.SWAP_ROUTER,
+        data: encodeFunctionCall('swap(tuple,tuple,tuple,bytes)'),
+      };
+      if (isEthToDclaw) {
+        txParams.value = parseEther(swapInput);
+      }
+
+      const txHash = await rpcCall('eth_sendTransaction', [txParams]) as string;
       setSwapTxHash(txHash);
       setStatus('Swap submitted! Waiting for confirmation...');
 
-      // Poll for receipt
-      let receipt = null;
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 1000));
-        receipt = await rpcCall('eth_getTransactionReceipt', [txHash]);
-        if (receipt) break;
-      }
-
-      if (receipt && (receipt as { status: string }).status === '0x1') {
+      if (await waitForReceipt(txHash)) {
         setStatus('Swap successful!');
-        setSwapInputETH('');
-        setSwapOutputDCLAW('');
+        setSwapInput('');
+        setSwapOutput('');
         await fetchData(address);
-      } else if (receipt) {
-        setStatus('Swap failed - transaction reverted');
       } else {
-        setStatus('Swap pending - check your wallet');
+        setStatus('Swap failed - transaction reverted');
       }
     } catch (error: unknown) {
       console.error('Swap error:', error);
@@ -367,99 +453,144 @@ export default function DiamondClawsApp() {
     }
   };
 
-  // Hardhat faucet — send 10 ETH from a pre-funded Hardhat account
-  const [isFauceting, setIsFauceting] = useState(false);
-  const HARDHAT_RPC = 'http://127.0.0.1:8545';
-  // Hardhat account #0 (pre-funded with 10000 ETH)
-  const FAUCET_ACCOUNT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-
-  const requestFaucet = async () => {
-    if (!isConnected) {
-      setStatus('Connect your wallet first');
-      return;
-    }
-    setIsFauceting(true);
-    try {
-      // Call Hardhat node directly (bypassing MetaMask) to send from pre-funded account
-      const res = await fetch(HARDHAT_RPC, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'eth_sendTransaction',
-          params: [{
-            from: FAUCET_ACCOUNT,
-            to: address,
-            value: '0x8AC7230489E80000', // 10 ETH
-          }],
-          id: Date.now(),
-        }),
-      });
-      const data = await res.json();
-      if (data.error) {
-        throw new Error(data.error.message);
-      }
-      setStatus('Faucet: +10 ETH sent to your wallet!');
-      // Small delay for block to mine, then refresh balances
-      await new Promise(r => setTimeout(r, 500));
-      await fetchData(address);
-    } catch (error) {
-      console.error('Faucet error:', error);
-      setStatus('Faucet failed — make sure Hardhat node is running on port 8545');
-    } finally {
-      setIsFauceting(false);
-    }
-  };
-
-  // Stake tokens
+  // Stake tokens — approve DCLAW spend, then call stake()
   const stakeTokens = async () => {
-    if (!isConnected || !stakeAmount) return;
+    if (!isConnected || !stakeAmount || parseFloat(stakeAmount) <= 0) return;
 
     setIsLoading(true);
-    setStatus('Staking tokens...');
-
     try {
-      setStatus(`Staking ${stakeAmount} DCLAW - Please confirm in wallet`);
+      const amountWei = parseEther(stakeAmount);
 
-      setTimeout(() => {
+      // Step 1: Approve DCLAW spend
+      setStatus('Approving DCLAW spend... confirm in wallet');
+      const approveData = encodeFunctionCall('approve(address,uint256)', [
+        CONTRACTS.STAKING,
+        BigInt(amountWei).toString()
+      ]);
+      const approveTx = await rpcCall('eth_sendTransaction', [{
+        from: address,
+        to: CONTRACTS.DCLAW,
+        data: approveData,
+      }]) as string;
+
+      if (!(await waitForReceipt(approveTx))) {
+        setStatus('Approval failed');
+        setIsLoading(false);
+        return;
+      }
+
+      // Step 2: Stake
+      setStatus(`Staking ${stakeAmount} DCLAW... confirm in wallet`);
+      const stakeData = encodeFunctionCall('stake(uint256)', [
+        BigInt(amountWei).toString()
+      ]);
+      const stakeTx = await rpcCall('eth_sendTransaction', [{
+        from: address,
+        to: CONTRACTS.STAKING,
+        data: stakeData,
+      }]) as string;
+
+      if (await waitForReceipt(stakeTx)) {
         setStatus(`Successfully staked ${stakeAmount} DCLAW!`);
         setStakeAmount('');
-        setStakeCount(prev => prev + 1);
-        setIsLoading(false);
-      }, 2000);
-    } catch (error) {
+        await fetchData(address);
+      } else {
+        setStatus('Stake transaction failed');
+      }
+    } catch (error: unknown) {
       console.error('Stake error:', error);
-      setStatus('Staking failed');
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      if (msg.includes('User denied') || msg.includes('rejected')) {
+        setStatus('Transaction rejected');
+      } else {
+        setStatus('Staking failed: ' + msg.slice(0, 60));
+      }
+    } finally {
       setIsLoading(false);
     }
   };
 
   // Unstake tokens
   const unstakeTokens = async (stakeId: number) => {
+    if (!isConnected) return;
     setIsLoading(true);
-    setStatus('Unstaking...');
-
     try {
-      setStatus('Unstaking - 5% tax will be applied');
+      const stake = stakes.find(s => s.id === stakeId);
+      const taxRate = stake && isEarlyUnstake(stake.startTime) ? '10%' : '5%';
+      setStatus(`Unstaking... ${taxRate} tax will be applied. Confirm in wallet.`);
 
-      setTimeout(() => {
-        setStatus('Successfully unstaked! (5% tax deducted)');
-        setIsLoading(false);
-      }, 2000);
-    } catch (error) {
+      const unstakeData = encodeFunctionCall('unstake(uint256)', [stakeId.toString()]);
+      const txHash = await rpcCall('eth_sendTransaction', [{
+        from: address,
+        to: CONTRACTS.STAKING,
+        data: unstakeData,
+      }]) as string;
+
+      if (await waitForReceipt(txHash)) {
+        setStatus(`Successfully unstaked! (${taxRate} tax deducted)`);
+        await fetchData(address);
+      } else {
+        setStatus('Unstake transaction failed');
+      }
+    } catch (error: unknown) {
       console.error('Unstake error:', error);
-      setStatus('Unstake failed');
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      if (msg.includes('User denied') || msg.includes('rejected')) {
+        setStatus('Transaction rejected');
+      } else {
+        setStatus('Unstake failed: ' + msg.slice(0, 60));
+      }
+    } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Claim all staking rewards
+  const claimAllRewards = async () => {
+    if (!isConnected || totalPendingRewards === BigInt(0)) return;
+    setIsClaiming(true);
+    setStatus('Claiming rewards... confirm in wallet');
+    try {
+      const claimData = encodeFunctionCall('claimAllRewards()', []);
+      const txHash = await rpcCall('eth_sendTransaction', [{
+        from: address,
+        to: CONTRACTS.STAKING,
+        data: claimData,
+      }]) as string;
+
+      if (await waitForReceipt(txHash)) {
+        setStatus(`Claimed ${formatEther(totalPendingRewards)} DCLAW in rewards!`);
+        await fetchData(address);
+      } else {
+        setStatus('Claim transaction failed');
+      }
+    } catch (error: unknown) {
+      console.error('Claim error:', error);
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      if (msg.includes('User denied') || msg.includes('rejected')) {
+        setStatus('Transaction rejected');
+      } else {
+        setStatus('Claim failed: ' + msg.slice(0, 60));
+      }
+    } finally {
+      setIsClaiming(false);
     }
   };
 
   // Auto-clear status after 5 seconds
   useEffect(() => {
-    if (status && !isSwapping && !isLoading) {
+    if (status && !isSwapping && !isLoading && !isClaiming) {
       const timer = setTimeout(() => setStatus(''), 5000);
       return () => clearTimeout(timer);
     }
-  }, [status, isSwapping, isLoading]);
+  }, [status, isSwapping, isLoading, isClaiming]);
+
+  // Auto-refresh data every 30 seconds (keeps rewards display current)
+  useEffect(() => {
+    if (!isConnected || !address) return;
+    const interval = setInterval(() => fetchData(address), 30000);
+    return () => clearInterval(interval);
+  }, [isConnected, address, fetchData]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950">
@@ -475,6 +606,10 @@ export default function DiamondClawsApp() {
           </div>
 
           <div className="flex items-center gap-4">
+            <nav className="hidden md:flex items-center gap-1 text-sm">
+              <span className="px-3 py-1.5 text-yellow-400 font-medium bg-yellow-500/10 rounded-lg">Home</span>
+              <a href="/positions" className="px-3 py-1.5 text-gray-400 hover:text-yellow-400 hover:bg-yellow-500/10 rounded-lg transition-colors">Positions</a>
+            </nav>
             {isConnected && (
               <div className="hidden md:flex items-center gap-3 text-sm">
                 <span className="text-gray-400">{ethBalance} ETH</span>
@@ -510,7 +645,7 @@ export default function DiamondClawsApp() {
           <div className="relative z-10 pointer-events-none">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-yellow-500/10 border border-yellow-500/30 rounded-full mb-6">
               <Zap className="text-yellow-400" size={16} />
-              <span className="text-yellow-400 text-sm font-medium">365% APY Staking &bull; 8% Sell Tax &bull; 5% Unstake Tax</span>
+              <span className="text-yellow-400 text-sm font-medium">{contractAPY}% APY Staking &bull; 8% Sell Tax &bull; 5% Unstake Tax</span>
             </div>
 
             <h2 className="text-5xl md:text-7xl font-black mb-6">
@@ -543,7 +678,7 @@ export default function DiamondClawsApp() {
           {[
             { icon: Coins, label: 'Total Supply', value: '1B DCLAW SUPPLY' },
             { icon: Users, label: 'Diamond Holders', value: '' },
-            { icon: TrendingUp, label: 'APY', value: 'x%' },
+            { icon: TrendingUp, label: 'APY', value: `${contractAPY}%` },
             { icon: Shield, label: 'Tax on Sell', value: '8%' },
           ].map((stat, i) => (
             <motion.div
@@ -560,33 +695,6 @@ export default function DiamondClawsApp() {
           ))}
         </div>
 
-        {/* Hardhat Faucet */}
-        <div className="max-w-lg mx-auto mb-6">
-          <div className="flex items-center justify-between p-4 bg-blue-500/10 border border-blue-500/30 rounded-2xl">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400 text-lg">
-                🚰
-              </div>
-              <div>
-                <p className="text-sm font-medium text-white">Hardhat Faucet</p>
-                <p className="text-xs text-gray-400">Get test ETH for swapping</p>
-              </div>
-            </div>
-            <button
-              onClick={requestFaucet}
-              disabled={isFauceting || !isConnected}
-              className="px-5 py-2 bg-blue-500 hover:bg-blue-400 disabled:bg-gray-700 text-white font-bold text-sm rounded-xl transition-all flex items-center gap-2"
-            >
-              {isFauceting ? (
-                <Loader2 className="animate-spin" size={14} />
-              ) : (
-                <Zap size={14} />
-              )}
-              {isConnected ? 'Get 10 ETH' : 'Connect Wallet'}
-            </button>
-          </div>
-        </div>
-
         {/* Swap Section */}
         <section id="swap" className="mb-16">
           <motion.div
@@ -599,83 +707,102 @@ export default function DiamondClawsApp() {
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-xl font-bold text-white">Swap</h3>
                 <div className="flex items-center gap-2 text-xs text-gray-400">
-                  <span>1 ETH = {swapRate} DCLAW</span>
+                  <span>Uniswap v4 AMM</span>
                 </div>
               </div>
 
-              {/* From: ETH */}
+              {/* From */}
               <div className="bg-black/40 rounded-2xl p-4 mb-2 border border-yellow-500/10">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-gray-400">From</span>
                   {isConnected && (
                     <button
                       onClick={() => {
-                        const max = Math.max(0, parseFloat(ethBalance) - 0.01);
-                        setSwapInputETH(max > 0 ? max.toString() : '');
+                        if (swapDirection === 'ethToDclaw') {
+                          const max = Math.max(0, parseFloat(ethBalance) - 0.01);
+                          setSwapInput(max > 0 ? max.toString() : '');
+                        } else {
+                          setSwapInput(dclawBalance.replace(/,/g, '') || '');
+                        }
                       }}
                       className="text-xs text-yellow-400 hover:text-yellow-300"
                     >
-                      Balance: {ethBalance} ETH
+                      Balance: {swapDirection === 'ethToDclaw' ? `${ethBalance} ETH` : `${dclawBalance} DCLAW`}
                     </button>
                   )}
                 </div>
                 <div className="flex items-center gap-3">
                   <input
                     type="number"
-                    value={swapInputETH}
-                    onChange={(e) => setSwapInputETH(e.target.value)}
+                    value={swapInput}
+                    onChange={(e) => setSwapInput(e.target.value)}
                     placeholder="0.0"
                     min="0"
-                    step="0.01"
-                    className="flex-1 bg-transparent text-3xl font-bold text-white placeholder-gray-600 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    step={swapDirection === 'ethToDclaw' ? '0.01' : '1'}
+                    className="flex-1 min-w-0 bg-transparent text-3xl font-bold text-white placeholder-gray-600 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   />
-                  <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
-                    <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-xs font-bold text-white">
-                      E
+                  {swapDirection === 'ethToDclaw' ? (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
+                      <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-xs font-bold text-white">E</div>
+                      <span className="font-bold text-white">ETH</span>
                     </div>
-                    <span className="font-bold text-white">ETH</span>
-                  </div>
+                  ) : (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
+                      <img src="/diamondclaw2.png" alt="DCLAW" className="w-6 h-6 rounded-full" />
+                      <span className="font-bold text-yellow-400">DCLAW</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Arrow */}
+              {/* Flip Button */}
               <div className="flex justify-center -my-3 relative z-10">
-                <div className="w-10 h-10 rounded-xl bg-gray-800 border-4 border-gray-900 flex items-center justify-center">
-                  <ArrowDown className="text-yellow-400" size={18} />
-                </div>
+                <button
+                  onClick={flipSwapDirection}
+                  className="w-10 h-10 rounded-xl bg-gray-800 border-4 border-gray-900 flex items-center justify-center hover:bg-gray-700 transition-colors cursor-pointer group"
+                >
+                  <ArrowUpDown className="text-yellow-400 group-hover:rotate-180 transition-transform duration-300" size={18} />
+                </button>
               </div>
 
-              {/* To: DCLAW */}
+              {/* To */}
               <div className="bg-black/40 rounded-2xl p-4 mt-2 border border-yellow-500/10">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-gray-400">To (estimated)</span>
                   {isConnected && (
                     <span className="text-xs text-gray-500">
-                      Balance: {dclawBalance} DCLAW
+                      Balance: {swapDirection === 'ethToDclaw' ? `${dclawBalance} DCLAW` : `${ethBalance} ETH`}
                     </span>
                   )}
                 </div>
                 <div className="flex items-center gap-3">
                   <div className="flex-1 text-3xl font-bold text-white">
-                    {swapOutputDCLAW || <span className="text-gray-600">0.0</span>}
+                    {swapOutput || <span className="text-gray-600">0.0</span>}
                   </div>
-                  <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
-                    <img src="/diamondclaw2.png" alt="DCLAW" className="w-6 h-6 rounded-full" />
-                    <span className="font-bold text-yellow-400">DCLAW</span>
-                  </div>
+                  {swapDirection === 'ethToDclaw' ? (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
+                      <img src="/diamondclaw2.png" alt="DCLAW" className="w-6 h-6 rounded-full" />
+                      <span className="font-bold text-yellow-400">DCLAW</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-xl">
+                      <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-xs font-bold text-white">E</div>
+                      <span className="font-bold text-white">ETH</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Swap Details */}
-              {swapInputETH && parseFloat(swapInputETH) > 0 && (
+              {swapInput && parseFloat(swapInput) > 0 && (
                 <div className="mt-4 p-3 bg-black/20 rounded-xl space-y-1 text-sm">
                   <div className="flex justify-between text-gray-400">
                     <span>Rate</span>
-                    <span>1 ETH = {swapRate} DCLAW</span>
+                    <span>Uniswap v4 AMM</span>
                   </div>
                   <div className="flex justify-between text-gray-400">
-                    <span>Available Liquidity</span>
-                    <span>{liquidity} DCLAW</span>
+                    <span>Fee</span>
+                    <span>0.3%</span>
                   </div>
                 </div>
               )}
@@ -683,7 +810,7 @@ export default function DiamondClawsApp() {
               {/* Swap Button */}
               <button
                 onClick={executeSwap}
-                disabled={isSwapping || !swapInputETH || parseFloat(swapInputETH || '0') <= 0 || !isConnected}
+                disabled={isSwapping || !swapInput || parseFloat(swapInput || '0') <= 0 || !isConnected}
                 className="w-full mt-4 py-4 bg-yellow-500 hover:bg-yellow-400 disabled:bg-gray-700 disabled:cursor-not-allowed text-black font-bold rounded-2xl transition-all flex items-center justify-center gap-2 text-lg"
               >
                 {!isConnected ? (
@@ -696,12 +823,12 @@ export default function DiamondClawsApp() {
                     <Loader2 className="animate-spin" size={20} />
                     Swapping...
                   </>
-                ) : !swapInputETH || parseFloat(swapInputETH || '0') <= 0 ? (
+                ) : !swapInput || parseFloat(swapInput || '0') <= 0 ? (
                   'Enter an amount'
                 ) : (
                   <>
                     <RefreshCw size={20} />
-                    Swap
+                    Swap {swapDirection === 'ethToDclaw' ? 'ETH for DCLAW' : 'DCLAW for ETH'}
                   </>
                 )}
               </button>
@@ -732,34 +859,46 @@ export default function DiamondClawsApp() {
               </div>
               <div>
                 <h3 className="text-2xl font-bold text-white">Stake &amp; Earn</h3>
-                <p className="text-gray-400">Lock your DCLAW and earn 365% APY</p>
+                <p className="text-gray-400">Lock your DCLAW and earn {contractAPY}% APY</p>
               </div>
             </div>
 
             <div className="grid md:grid-cols-2 gap-8">
+              {/* Left Column — Stake Input */}
               <div className="space-y-4">
                 <label className="block text-sm text-gray-400">Stake Amount (DCLAW)</label>
-                <input
-                  type="number"
-                  value={stakeAmount}
-                  onChange={(e) => setStakeAmount(e.target.value)}
-                  placeholder="Enter amount to stake..."
-                  className="w-full px-6 py-4 bg-black/50 border border-yellow-500/30 rounded-xl text-white text-xl focus:outline-none focus:border-yellow-500"
-                />
+                <div className="relative">
+                  <input
+                    type="number"
+                    value={stakeAmount}
+                    onChange={(e) => setStakeAmount(e.target.value)}
+                    placeholder="Enter amount to stake..."
+                    className="w-full px-6 py-4 bg-black/50 border border-yellow-500/30 rounded-xl text-white text-xl focus:outline-none focus:border-yellow-500"
+                  />
+                  {isConnected && (
+                    <button
+                      onClick={() => setStakeAmount(dclawBalance.replace(/,/g, ''))}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-yellow-400 hover:text-yellow-300 px-2 py-1 bg-yellow-500/10 rounded"
+                    >
+                      MAX
+                    </button>
+                  )}
+                </div>
 
                 <div className="p-4 bg-black/30 rounded-xl border border-yellow-500/20">
                   <div className="flex items-center gap-2 text-yellow-400 mb-2">
                     <Gift size={16} />
-                    <span className="font-medium">Staking Rewards:</span>
+                    <span className="font-medium">Estimated Rewards:</span>
                   </div>
                   <p className="text-2xl font-bold text-white">
-                    {((parseFloat(stakeAmount || '0') * 365) / 100).toFixed(2)} DCLAW / year
+                    {((parseFloat(stakeAmount || '0') * contractAPY) / 100).toFixed(2)} DCLAW / year
                   </p>
+                  <p className="text-xs text-gray-500 mt-1">{contractAPY}% APY</p>
                 </div>
 
                 <button
                   onClick={stakeTokens}
-                  disabled={isLoading || !stakeAmount || !isConnected}
+                  disabled={isLoading || !stakeAmount || parseFloat(stakeAmount || '0') <= 0 || !isConnected}
                   className="w-full py-4 bg-yellow-500 hover:bg-yellow-400 disabled:bg-gray-700 text-black font-bold rounded-xl transition-all flex items-center justify-center gap-2"
                 >
                   {isLoading ? (
@@ -780,22 +919,73 @@ export default function DiamondClawsApp() {
                 </p>
               </div>
 
+              {/* Right Column — Stakes & Rewards */}
               <div className="space-y-4">
-                <h4 className="font-bold text-white">Your Stakes</h4>
-                {stakeCount > 0 ? (
+                {/* Claim Rewards Banner */}
+                {stakes.length > 0 && totalPendingRewards > BigInt(0) && (
+                  <div className="flex items-center justify-between p-4 bg-yellow-500/10 rounded-xl border border-yellow-500/30">
+                    <div>
+                      <p className="text-sm text-gray-400">Pending Rewards</p>
+                      <p className="text-xl font-bold text-yellow-400">
+                        {formatEther(totalPendingRewards)} DCLAW
+                      </p>
+                    </div>
+                    <button
+                      onClick={claimAllRewards}
+                      disabled={isClaiming || totalPendingRewards === BigInt(0)}
+                      className="px-5 py-2 bg-yellow-500 hover:bg-yellow-400 disabled:bg-gray-700 text-black font-bold rounded-xl transition-all flex items-center gap-2"
+                    >
+                      {isClaiming ? (
+                        <Loader2 className="animate-spin" size={16} />
+                      ) : (
+                        <Gift size={16} />
+                      )}
+                      Claim All
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-white">Your Stakes</h4>
+                  <span className="text-xs text-gray-500">
+                    Total staked: {formatEther(contractTotalStaked)} DCLAW
+                  </span>
+                </div>
+
+                {stakes.length > 0 ? (
                   <div className="space-y-3">
-                    {[...Array(stakeCount)].map((_, i) => (
-                      <div key={i} className="flex items-center justify-between p-4 bg-black/30 rounded-xl border border-yellow-500/10">
-                        <div>
-                          <p className="font-medium text-white">Stake #{i + 1}</p>
-                          <p className="text-sm text-gray-400">{stakedAmount} DCLAW</p>
+                    {stakes.map((stake) => (
+                      <div key={stake.id} className="p-4 bg-black/30 rounded-xl border border-yellow-500/10">
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <p className="font-medium text-white">Stake #{stake.id + 1}</p>
+                            <p className="text-sm text-gray-400">
+                              {formatEther(stake.amount)} DCLAW
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => unstakeTokens(stake.id)}
+                            disabled={isLoading}
+                            className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-50 text-red-400 rounded-lg text-sm font-medium transition-colors"
+                          >
+                            Unstake
+                          </button>
                         </div>
-                        <button
-                          onClick={() => unstakeTokens(i)}
-                          className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm font-medium transition-colors"
-                        >
-                          Unstake
-                        </button>
+                        <div className="flex items-center justify-between text-xs text-gray-500">
+                          <span>Staked {formatTimeSince(stake.startTime)}</span>
+                          <span className="text-yellow-400/80">
+                            +{formatEther(stake.pendingReward)} DCLAW earned
+                          </span>
+                        </div>
+                        {isEarlyUnstake(stake.startTime) ? (
+                          <div className="mt-2 text-xs text-red-400/80">
+                            Early unstake tax: 10% (less than 7 days)
+                          </div>
+                        ) : (
+                          <div className="mt-2 text-xs text-yellow-500/60">
+                            Unstake tax: 5%
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>

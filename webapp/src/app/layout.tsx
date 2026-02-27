@@ -5,6 +5,9 @@ export const metadata: Metadata = {
   title: 'Diamond Claws (DCLAW) - These Claws Never Sell',
   description: 'The ultimate meme coin combining Diamond Hands conviction with OpenClaw agentic culture. Buy, stake, and HODL!',
   keywords: ['crypto', 'meme coin', 'DCLAW', 'Diamond Hands', 'staking', 'Web3'],
+  icons: {
+    icon: '/diamondclaw2.png',
+  },
 };
 
 export default function RootLayout({

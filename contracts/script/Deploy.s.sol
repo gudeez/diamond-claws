@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.24;
 
 import {Script, console} from "forge-std/Script.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -11,6 +11,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {DiamondClaws} from "../contracts/DiamondClaws.sol";
 import {DiamondClawsStaking} from "../contracts/DiamondClawsStaking.sol";
 import {DCLAWSwap} from "../contracts/DCLAWSwap.sol";
+import {DCLAWLiquidityRouter} from "../contracts/DCLAWLiquidityRouter.sol";
 
 /**
  * @title Deploy
@@ -31,12 +32,21 @@ contract Deploy is Script {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80)); // Anvil account #0
         address deployer = vm.addr(deployerKey);
 
+        // Use existing PoolManager if POOL_MANAGER env is set (for testnet/mainnet), otherwise deploy new
+        address existingPM = vm.envOr("POOL_MANAGER", address(0));
+
         console.log("Deployer:", deployer);
 
         vm.startBroadcast(deployerKey);
 
-        // 1. Deploy PoolManager (for local dev; on mainnet/testnet use existing deployment)
-        PoolManager poolManager = new PoolManager(deployer);
+        // 1. Deploy or use existing PoolManager
+        PoolManager poolManager;
+        if (existingPM != address(0)) {
+            poolManager = PoolManager(payable(existingPM));
+            console.log("Using existing PoolManager:", existingPM);
+        } else {
+            poolManager = new PoolManager(deployer);
+        }
         console.log("PoolManager:", address(poolManager));
 
         // 2. Deploy DiamondClaws token
@@ -59,7 +69,7 @@ contract Deploy is Script {
 
         address hookAddress;
         bytes32 salt;
-        for (uint256 i = 0; i < 10000; i++) {
+        for (uint256 i = 0; i < 100000; i++) {
             salt = bytes32(i);
             hookAddress = vm.computeCreate2Address(salt, keccak256(hookCreationCode));
             if (_hasCorrectFlags(hookAddress)) {
@@ -73,10 +83,15 @@ contract Deploy is Script {
         console.log("DCLAWSwap hook:", address(hook));
         console.log("Salt:", vm.toString(salt));
 
-        // 6. Exclude hook from token taxes
-        dclaw.setTaxExcluded(address(hook), true);
+        // 6. Deploy liquidity router
+        DCLAWLiquidityRouter liquidityRouter = new DCLAWLiquidityRouter(IPoolManager(address(poolManager)));
+        console.log("LiquidityRouter:", address(liquidityRouter));
 
-        // 7. Initialize a DCLAW/ETH pool with the hook
+        // 7. Exclude hook and liquidity router from token taxes
+        dclaw.setTaxExcluded(address(hook), true);
+        dclaw.setTaxExcluded(address(liquidityRouter), true);
+
+        // 8. Initialize a DCLAW/ETH pool with the hook
         //    Currency0 must be < Currency1 by address sort order.
         //    Native ETH = address(0), DCLAW = address(dclaw)
         Currency currency0;
@@ -111,11 +126,14 @@ contract Deploy is Script {
         console.log("DiamondClaws (DCLAW):", address(dclaw));
         console.log("DiamondClawsStaking:", address(staking));
         console.log("DCLAWSwap Hook:     ", address(hook));
+        console.log("LiquidityRouter:    ", address(liquidityRouter));
         console.log("========================================");
     }
 
     function _hasCorrectFlags(address addr) internal pure returns (bool) {
+        // All hook permission flags span bits 0-13 (0x3FFF)
+        uint160 ALL_FLAG_MASK = uint160(0x3FFF);
         return uint160(addr) & HOOK_FLAGS == HOOK_FLAGS
-            && uint160(addr) & ~HOOK_FLAGS & uint160(0xFF) == 0; // Only our flags, no extras
+            && uint160(addr) & ~HOOK_FLAGS & ALL_FLAG_MASK == 0; // Only our flags, no extras
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
@@ -167,11 +167,11 @@ contract DCLAWSwapTest is Test, Deployers {
 
     // --- Fee Tests ---
 
-    function test_feeCalculation() public view {
+    function test_feeCalculation() public pure {
         // swapFeeBP = 30 (0.3%)
-        // For 10000 input, fee should be 3
+        // For 10000 input, fee = 10000 * 30 / 10000 = 30
         uint256 expectedFee = (10000 * 30) / 10000;
-        assertEq(expectedFee, 3);
+        assertEq(expectedFee, 30);
     }
 
     // --- Helpers ---
