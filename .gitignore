@@ -35,5 +35,8 @@ Thumbs.db
 cache/
 artifacts/
 
+# Foundry dependencies (installed via forge install)
+contracts/lib/
+
 # Keys
 *.json.key

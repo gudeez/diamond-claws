@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import dynamic from 'next/dynamic';
 import {
@@ -17,13 +17,37 @@ import {
   ExternalLink,
   CheckCircle,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  X
 } from 'lucide-react';
 
 const DiamondClaws3D = dynamic(() => import('@/components/DiamondClaws3D'), {
   ssr: false,
   loading: () => <div className="w-full h-full" />,
 });
+
+// EIP-6963 types
+interface EIP6963ProviderInfo {
+  uuid: string;
+  name: string;
+  icon: string;
+  rdns: string;
+}
+
+interface EIP1193Provider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  on?(event: string, handler: (...args: unknown[]) => void): void;
+  removeListener?(event: string, handler: (...args: unknown[]) => void): void;
+}
+
+interface EIP6963ProviderDetail {
+  info: EIP6963ProviderInfo;
+  provider: EIP1193Provider;
+}
+
+interface EIP6963AnnounceProviderEvent extends Event {
+  detail: EIP6963ProviderDetail;
+}
 
 // Contract ABIs
 const DCLAW_ABI = [
@@ -50,9 +74,9 @@ const SWAP_ABI = [
 
 // Contract addresses (local Hardhat deployment)
 const CONTRACTS = {
-  DCLAW: '0x610178dA211FEF7D417bC0e6FeD39F05609AD788',
-  STAKING: '0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e',
-  SWAP: '0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82',
+  DCLAW: '0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1',
+  STAKING: '0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44',
+  SWAP: '0x4A679253410272dd5232B3Ff7cF5dbB88f295319',
   CHAIN_ID: 31337,
 };
 
@@ -130,11 +154,52 @@ export default function DiamondClawsApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [status, setStatus] = useState('');
 
-  // RPC call helper
-  const rpcCall = useCallback(async (method: string, params: unknown[]) => {
-    if (typeof window.ethereum === 'undefined') return null;
-    return window.ethereum.request({ method, params });
+  // EIP-6963 wallet discovery state
+  const [discoveredWallets, setDiscoveredWallets] = useState<EIP6963ProviderDetail[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<EIP1193Provider | null>(null);
+  const [selectedWalletName, setSelectedWalletName] = useState('');
+  const [showWalletPicker, setShowWalletPicker] = useState(false);
+  const walletsRef = useRef<EIP6963ProviderDetail[]>([]);
+
+  // EIP-6963 wallet discovery
+  useEffect(() => {
+    const handleAnnounce = (event: Event) => {
+      const e = event as EIP6963AnnounceProviderEvent;
+      const detail = e.detail;
+      // Deduplicate by uuid
+      if (!walletsRef.current.some(w => w.info.uuid === detail.info.uuid)) {
+        walletsRef.current = [...walletsRef.current, detail];
+        setDiscoveredWallets([...walletsRef.current]);
+      }
+    };
+
+    window.addEventListener('eip6963:announceProvider', handleAnnounce);
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+    // Fallback: if no EIP-6963 wallets found, use window.ethereum
+    const fallbackTimer = setTimeout(() => {
+      const eth = (window as unknown as { ethereum?: EIP1193Provider }).ethereum;
+      if (walletsRef.current.length === 0 && eth) {
+        const fallbackProvider: EIP6963ProviderDetail = {
+          info: { uuid: 'legacy', name: 'Browser Wallet', icon: '', rdns: 'legacy' },
+          provider: eth,
+        };
+        walletsRef.current = [fallbackProvider];
+        setDiscoveredWallets([fallbackProvider]);
+      }
+    }, 500);
+
+    return () => {
+      window.removeEventListener('eip6963:announceProvider', handleAnnounce);
+      clearTimeout(fallbackTimer);
+    };
   }, []);
+
+  // RPC call helper — uses selected EIP-6963 provider instead of window.ethereum
+  const rpcCall = useCallback(async (method: string, params: unknown[]) => {
+    if (!selectedProvider) return null;
+    return selectedProvider.request({ method, params });
+  }, [selectedProvider]);
 
   // Read contract helper
   const readContract = useCallback(async (to: string, data: string) => {
@@ -177,24 +242,50 @@ export default function DiamondClawsApp() {
     }
   }, [rpcCall, readContract]);
 
-  // Connect wallet
-  const connectWallet = useCallback(async () => {
-    if (typeof window.ethereum !== 'undefined') {
+  // Select a wallet provider and connect
+  const selectAndConnect = useCallback(async (wallet: EIP6963ProviderDetail) => {
+    setSelectedProvider(wallet.provider);
+    setSelectedWalletName(wallet.info.name);
+    setShowWalletPicker(false);
+    try {
+      const accounts = await wallet.provider.request({
+        method: 'eth_requestAccounts',
+      }) as string[];
+      setAddress(accounts[0]);
+      setIsConnected(true);
+      // fetchData will pick up the new selectedProvider on next render via rpcCall,
+      // but we need to use the provider directly here since state hasn't updated yet
       try {
-        const accounts = await window.ethereum.request({
-          method: 'eth_requestAccounts'
-        }) as string[];
-        setAddress(accounts[0]);
-        setIsConnected(true);
-        await fetchData(accounts[0]);
-      } catch (error) {
-        console.error('Failed to connect:', error);
-        setStatus('Failed to connect wallet');
-      }
-    } else {
-      setStatus('Please install MetaMask');
+        const ethBal = await wallet.provider.request({ method: 'eth_getBalance', params: [accounts[0], 'latest'] });
+        if (ethBal) setEthBalance(formatEther(BigInt(ethBal as string)));
+        const dclawBal = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.DCLAW, data: encodeFunctionCall('balanceOf(address)', [accounts[0]]) }, 'latest'] });
+        if (dclawBal) setDclawBalance(formatEther(decodeUint256(dclawBal as string)));
+        const rate = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.SWAP, data: encodeFunctionCall('rate()') }, 'latest'] });
+        if (rate) { const rateValue = decodeUint256(rate as string); setSwapRate((Number(rateValue) / 1e18).toLocaleString()); }
+        const liq = await wallet.provider.request({ method: 'eth_call', params: [{ to: CONTRACTS.SWAP, data: encodeFunctionCall('availableLiquidity()') }, 'latest'] });
+        if (liq) setLiquidity(formatEther(decodeUint256(liq as string)));
+      } catch (e) { console.error('Error fetching initial data:', e); }
+    } catch (error) {
+      console.error('Failed to connect:', error);
+      setStatus('Failed to connect wallet');
+      setSelectedProvider(null);
+      setSelectedWalletName('');
     }
-  }, [fetchData]);
+  }, []);
+
+  // Connect wallet — show picker if multiple wallets, auto-select if one
+  const connectWallet = useCallback(async () => {
+    if (isConnected) return; // Already connected
+    if (discoveredWallets.length === 0) {
+      setStatus('No wallet detected. Please install a wallet extension.');
+      return;
+    }
+    if (discoveredWallets.length === 1) {
+      await selectAndConnect(discoveredWallets[0]);
+    } else {
+      setShowWalletPicker(true);
+    }
+  }, [discoveredWallets, selectAndConnect, isConnected]);
 
   // Calculate swap output when input changes
   useEffect(() => {
@@ -276,6 +367,50 @@ export default function DiamondClawsApp() {
     }
   };
 
+  // Hardhat faucet — send 10 ETH from a pre-funded Hardhat account
+  const [isFauceting, setIsFauceting] = useState(false);
+  const HARDHAT_RPC = 'http://127.0.0.1:8545';
+  // Hardhat account #0 (pre-funded with 10000 ETH)
+  const FAUCET_ACCOUNT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+
+  const requestFaucet = async () => {
+    if (!isConnected) {
+      setStatus('Connect your wallet first');
+      return;
+    }
+    setIsFauceting(true);
+    try {
+      // Call Hardhat node directly (bypassing MetaMask) to send from pre-funded account
+      const res = await fetch(HARDHAT_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_sendTransaction',
+          params: [{
+            from: FAUCET_ACCOUNT,
+            to: address,
+            value: '0x8AC7230489E80000', // 10 ETH
+          }],
+          id: Date.now(),
+        }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        throw new Error(data.error.message);
+      }
+      setStatus('Faucet: +10 ETH sent to your wallet!');
+      // Small delay for block to mine, then refresh balances
+      await new Promise(r => setTimeout(r, 500));
+      await fetchData(address);
+    } catch (error) {
+      console.error('Faucet error:', error);
+      setStatus('Faucet failed — make sure Hardhat node is running on port 8545');
+    } finally {
+      setIsFauceting(false);
+    }
+  };
+
   // Stake tokens
   const stakeTokens = async () => {
     if (!isConnected || !stakeAmount) return;
@@ -352,7 +487,7 @@ export default function DiamondClawsApp() {
             >
               <Wallet size={20} />
               {isConnected ? (
-                <span>{address.slice(0, 6)}...{address.slice(-4)}</span>
+                <span title={selectedWalletName}>{address.slice(0, 6)}...{address.slice(-4)}</span>
               ) : (
                 <span>Connect Wallet</span>
               )}
@@ -423,6 +558,33 @@ export default function DiamondClawsApp() {
               <p className="text-sm text-gray-400">{stat.label}</p>
             </motion.div>
           ))}
+        </div>
+
+        {/* Hardhat Faucet */}
+        <div className="max-w-lg mx-auto mb-6">
+          <div className="flex items-center justify-between p-4 bg-blue-500/10 border border-blue-500/30 rounded-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400 text-lg">
+                🚰
+              </div>
+              <div>
+                <p className="text-sm font-medium text-white">Hardhat Faucet</p>
+                <p className="text-xs text-gray-400">Get test ETH for swapping</p>
+              </div>
+            </div>
+            <button
+              onClick={requestFaucet}
+              disabled={isFauceting || !isConnected}
+              className="px-5 py-2 bg-blue-500 hover:bg-blue-400 disabled:bg-gray-700 text-white font-bold text-sm rounded-xl transition-all flex items-center gap-2"
+            >
+              {isFauceting ? (
+                <Loader2 className="animate-spin" size={14} />
+              ) : (
+                <Zap size={14} />
+              )}
+              {isConnected ? 'Get 10 ETH' : 'Connect Wallet'}
+            </button>
+          </div>
         </div>
 
         {/* Swap Section */}
@@ -648,6 +810,43 @@ export default function DiamondClawsApp() {
             </div>
           </motion.div>
         </section>
+
+        {/* Wallet Picker Modal */}
+        {showWalletPicker && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowWalletPicker(false)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-gray-900 border border-yellow-500/30 rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-white">Select Wallet</h3>
+                <button onClick={() => setShowWalletPicker(false)} className="text-gray-400 hover:text-white">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="space-y-2">
+                {discoveredWallets.map((wallet) => (
+                  <button
+                    key={wallet.info.uuid}
+                    onClick={() => selectAndConnect(wallet)}
+                    className="w-full flex items-center gap-3 p-3 bg-black/40 hover:bg-yellow-500/10 border border-yellow-500/10 hover:border-yellow-500/40 rounded-xl transition-all"
+                  >
+                    {wallet.info.icon ? (
+                      <img src={wallet.info.icon} alt={wallet.info.name} className="w-8 h-8 rounded-lg" />
+                    ) : (
+                      <div className="w-8 h-8 rounded-lg bg-yellow-500/20 flex items-center justify-center">
+                        <Wallet size={16} className="text-yellow-400" />
+                      </div>
+                    )}
+                    <span className="font-medium text-white">{wallet.info.name}</span>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          </div>
+        )}
 
         {/* Status */}
         {status && (
