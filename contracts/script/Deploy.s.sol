@@ -22,8 +22,12 @@ import {AgentRegistry} from "../contracts/AgentRegistry.sol";
  *        anvil
  *        forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
  *
+ *      Usage (Base Sepolia with existing PoolManager):
+ *        PRIVATE_KEY=0x... POOL_MANAGER=0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408 \
+ *          forge script script/Deploy.s.sol --rpc-url https://base-sepolia-rpc.publicnode.com --broadcast --slow
+ *
  *      The hook address must encode permission flags in its lower address bits.
- *      We mine a CREATE2 salt to produce a valid hook address.
+ *      CREATE2 salt is mined before broadcast to avoid slow fork simulation.
  */
 contract Deploy is Script {
     // Hook flags required: BEFORE_SWAP (1<<7) | BEFORE_SWAP_RETURNS_DELTA (1<<3) = 0x88
@@ -38,6 +42,22 @@ contract Deploy is Script {
 
         console.log("Deployer:", deployer);
 
+        // --- Pre-broadcast: mine CREATE2 salt locally (no RPC needed) ---
+        // When using an existing PoolManager, we know the address ahead of time.
+        // For local Anvil, we predict the PoolManager address from deployer nonce.
+        address pmAddressForSalt;
+        if (existingPM != address(0)) {
+            pmAddressForSalt = existingPM;
+        } else {
+            // On Anvil, PoolManager is the first deployment (nonce 0 by default)
+            pmAddressForSalt = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+        }
+
+        (bytes32 salt, address hookAddress) = _mineSalt(pmAddressForSalt, deployer);
+        console.log("Pre-mined salt:", vm.toString(salt));
+        console.log("Expected hook:", hookAddress);
+
+        // --- Broadcast: deploy contracts ---
         vm.startBroadcast(deployerKey);
 
         // 1. Deploy or use existing PoolManager
@@ -61,28 +81,10 @@ contract Deploy is Script {
         // 4. Link staking contract to token
         dclaw.setStakingContract(address(staking));
 
-        // 5. Deploy DCLAWSwap hook via CREATE2 with a mined salt
-        //    The hook address must have the correct permission flags in its lower bits.
-        bytes memory hookCreationCode = abi.encodePacked(
-            type(DCLAWSwap).creationCode,
-            abi.encode(IPoolManager(address(poolManager)), deployer)
-        );
-
-        address hookAddress;
-        bytes32 salt;
-        for (uint256 i = 0; i < 100000; i++) {
-            salt = bytes32(i);
-            hookAddress = vm.computeCreate2Address(salt, keccak256(hookCreationCode));
-            if (_hasCorrectFlags(hookAddress)) {
-                break;
-            }
-        }
-        require(_hasCorrectFlags(hookAddress), "Could not find valid hook salt");
-
+        // 5. Deploy DCLAWSwap hook via CREATE2 with pre-mined salt
         DCLAWSwap hook = new DCLAWSwap{salt: salt}(IPoolManager(address(poolManager)), deployer);
         require(address(hook) == hookAddress, "Hook address mismatch");
         console.log("DCLAWSwap hook:", address(hook));
-        console.log("Salt:", vm.toString(salt));
 
         // 6. Deploy liquidity router
         DCLAWLiquidityRouter liquidityRouter = new DCLAWLiquidityRouter(IPoolManager(address(poolManager)));
@@ -135,6 +137,30 @@ contract Deploy is Script {
         console.log("LiquidityRouter:    ", address(liquidityRouter));
         console.log("AgentRegistry:      ", address(agentRegistry));
         console.log("========================================");
+    }
+
+    function _mineSalt(address pmAddress, address deployer) internal pure returns (bytes32, address) {
+        bytes memory hookCreationCode = abi.encodePacked(
+            type(DCLAWSwap).creationCode,
+            abi.encode(IPoolManager(pmAddress), deployer)
+        );
+        bytes32 initCodeHash = keccak256(hookCreationCode);
+
+        for (uint256 i = 0; i < 200000; i++) {
+            bytes32 salt = bytes32(i);
+            // CREATE2 address = keccak256(0xff ++ deployer ++ salt ++ initCodeHash)
+            // vm.computeCreate2Address uses the default CREATE2 deployer
+            address hookAddr = address(uint160(uint256(keccak256(abi.encodePacked(
+                bytes1(0xff),
+                address(0x4e59b44847b379578588920cA78FbF26c0B4956C), // deterministic deployer
+                salt,
+                initCodeHash
+            )))));
+            if (_hasCorrectFlags(hookAddr)) {
+                return (salt, hookAddr);
+            }
+        }
+        revert("Could not find valid hook salt in 200000 iterations");
     }
 
     function _hasCorrectFlags(address addr) internal pure returns (bool) {

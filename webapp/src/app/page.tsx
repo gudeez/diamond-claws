@@ -70,15 +70,15 @@ const SWAP_ABI = [
   'function getQueueLength(tuple(address,address,uint24,int24,address)) view returns (uint256)',
 ];
 
-// Contract addresses — update after running: forge script script/Deploy.s.sol
+// Contract addresses — Base Mainnet deployment
 const CONTRACTS = {
-  DCLAW: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
-  STAKING: '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0',
-  POOL_MANAGER: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+  DCLAW: '0x778f108fbf1faa1ea735cc146f18c5a0b49cb47c',
+  STAKING: '0x5a41279c653b04c8859062d6d364049cd37baa4b',
+  POOL_MANAGER: '0x498581fF718922c3f8e6A244956aF099B2652b2b',
   SWAP_ROUTER: '0x0000000000000000000000000000000000000000',
-  HOOK: '0x950ebc63bc4415d20dee44dbd38faf64fa8b0088',
-  AGENT_REGISTRY: '0x0000000000000000000000000000000000000000', // Update after deployment
-  CHAIN_ID: 31337,
+  HOOK: '0x159fb90528f2a41f8603822bf7c0d7f664c60088',
+  AGENT_REGISTRY: '0x42646bf18c9e4ce919d3c8f9e1f5ec68dff0224a',
+  CHAIN_ID: 8453,
 };
 
 // ABI encoding helpers
@@ -620,6 +620,7 @@ export default function DiamondClawsApp() {
             <nav className="hidden md:flex items-center gap-1 text-sm">
               <span className="px-3 py-1.5 text-yellow-400 font-medium bg-yellow-500/10 rounded-lg">Home</span>
               <a href="/positions" className="px-3 py-1.5 text-gray-400 hover:text-yellow-400 hover:bg-yellow-500/10 rounded-lg transition-colors">Positions</a>
+              <a href="/crowdfund" className="px-3 py-1.5 text-gray-400 hover:text-yellow-400 hover:bg-yellow-500/10 rounded-lg transition-colors">Crowdfund</a>
             </nav>
             {isConnected && (
               <div className="hidden md:flex items-center gap-3 text-sm">

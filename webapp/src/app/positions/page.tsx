@@ -39,14 +39,14 @@ interface EIP6963AnnounceProviderEvent extends Event {
 }
 
 const CONTRACTS = {
-  DCLAW: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
-  POOL_MANAGER: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-  HOOK: '0x950ebc63bc4415d20dee44dbd38faf64fa8b0088',
-  LIQUIDITY_ROUTER: '0x5FC8d32690cc91D4c39d9d3abcBD16989F875707',
-  CHAIN_ID: 31337,
+  DCLAW: '0x778f108fbf1faa1ea735cc146f18c5a0b49cb47c',
+  POOL_MANAGER: '0x498581fF718922c3f8e6A244956aF099B2652b2b',
+  HOOK: '0x159fb90528f2a41f8603822bf7c0d7f664c60088',
+  LIQUIDITY_ROUTER: '0xa72196e90412ef1c9de7bb69e0d31287870afeeb',
+  CHAIN_ID: 8453,
 };
 
-const ANVIL_RPC = 'http://127.0.0.1:8545';
+const BASE_RPC = 'https://base-rpc.publicnode.com';
 const FAUCET_ACCOUNT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 // Pool constants
@@ -227,7 +227,7 @@ export default function PositionsPage() {
 
   // Direct RPC call to Anvil (bypasses wallet)
   const anvilRpc = useCallback(async (method: string, params: unknown[]) => {
-    const res = await fetch(ANVIL_RPC, {
+    const res = await fetch(BASE_RPC, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() }),
@@ -531,6 +531,7 @@ export default function PositionsPage() {
             <nav className="hidden md:flex items-center gap-1 text-sm">
               <a href="/" className="px-3 py-1.5 text-gray-400 hover:text-yellow-400 hover:bg-yellow-500/10 rounded-lg transition-colors">Home</a>
               <span className="px-3 py-1.5 text-yellow-400 font-medium bg-yellow-500/10 rounded-lg">Positions</span>
+              <a href="/crowdfund" className="px-3 py-1.5 text-gray-400 hover:text-yellow-400 hover:bg-yellow-500/10 rounded-lg transition-colors">Crowdfund</a>
             </nav>
             {isConnected && (
               <div className="hidden md:flex items-center gap-3 text-sm">

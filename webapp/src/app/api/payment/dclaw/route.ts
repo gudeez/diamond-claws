@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // Demo contract addresses (replace with actual deployed addresses)
-const DCLAW_TOKEN_ADDRESS = process.env.DCLAW_TOKEN_ADDRESS || '0x742d35Cc6634C0532925a3b844Bc9e7595f0AbBe';
-const STAKING_CONTRACT_ADDRESS = process.env.STAKING_CONTRACT_ADDRESS || '0x1234567890123456789012345678901234567890';
-const CHAIN_ID = parseInt(process.env.CHAIN_ID || '11155111'); // Sepolia
+const DCLAW_TOKEN_ADDRESS = process.env.DCLAW_TOKEN_ADDRESS || '0x778f108fbf1faa1ea735cc146f18c5a0b49cb47c';
+const STAKING_CONTRACT_ADDRESS = process.env.STAKING_CONTRACT_ADDRESS || '0x5a41279c653b04c8859062d6d364049cd37baa4b';
+const CHAIN_ID = parseInt(process.env.CHAIN_ID || '8453'); // Base Mainnet
 
 // Mock price: 1 ETH = 1000 DCLAW
 const ETH_PRICE_USD = 3000;

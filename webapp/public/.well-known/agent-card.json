@@ -12,8 +12,8 @@
       "name": "DCLAW Token",
       "description": "Diamond Claws ERC-20 token with ERC-2612 permit support, buy/sell taxes, and burnable supply.",
       "chains": {
-        "31337": {
-          "address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+        "8453": {
+          "address": "0x778f108fbf1faa1ea735cc146f18c5a0b49cb47c"
         }
       },
       "capabilities": ["transfer", "permit", "burn"]
@@ -24,8 +24,8 @@
       "name": "DCLAW Staking",
       "description": "Stake DCLAW tokens to earn minted rewards. Supports operator delegation for smart account agents.",
       "chains": {
-        "31337": {
-          "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+        "8453": {
+          "address": "0x5a41279c653b04c8859062d6d364049cd37baa4b"
         }
       },
       "capabilities": [
@@ -52,8 +52,8 @@
       "name": "DCLAW MEV-Protected Swap",
       "description": "Uniswap v4 hook for batched, MEV-protected swaps. Exact-input swaps are queued and executed by a keeper.",
       "chains": {
-        "31337": {
-          "hookAddress": "0x950ebc63bc4415d20dee44dbd38faf64fa8b0088"
+        "8453": {
+          "hookAddress": "0x159fb90528f2a41f8603822bf7c0d7f664c60088"
         }
       },
       "capabilities": ["batchedSwap", "mevProtection"]
@@ -64,8 +64,8 @@
       "name": "DCLAW/ETH Liquidity",
       "description": "Concentrated liquidity provision for DCLAW/ETH via Uniswap v4. Supports operator delegation for smart account agents.",
       "chains": {
-        "31337": {
-          "address": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
+        "8453": {
+          "address": "0xa72196e90412ef1c9de7bb69e0d31287870afeeb"
         }
       },
       "capabilities": [
@@ -75,6 +75,24 @@
         "removeLiquidityFor",
         "operatorDelegation"
       ]
+    },
+    {
+      "id": "dclaw-crowdfund",
+      "type": "crowdfund",
+      "name": "DCLAW Fair Launch Crowdfund",
+      "description": "Fair launch liquidity crowdfund. Users deposit ETH during a 14-day window, which is paired with DCLAW to seed permanent locked liquidity. Contributors receive proportional DCLAW tokens.",
+      "chains": {
+        "8453": {
+          "address": "0xeadd19817f1d8a734d353ec9b4ea194f2e51bf9a"
+        }
+      },
+      "capabilities": ["deposit", "claim", "refund"],
+      "parameters": {
+        "maxPerWallet": "5000000000000000000",
+        "minRaise": "100000000000000000",
+        "dclawForLiquidity": "200000000000000000000000000",
+        "dclawForContributors": "300000000000000000000000000"
+      }
     }
   ],
   "authentication": {
